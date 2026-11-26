@@ -1,6 +1,7 @@
 /* Leonida Tracker — static, offline-first app. No external services or analytics. */
 'use strict';
-const STORAGE_KEY = 'leonida-tracker-save-v1';
+const STORAGE_KEY = 'leonida-tracker-save-v1'; // Existing key is intentionally unchanged to preserve phone progress.
+const APP_VERSION = '1.1.0';
 const ICONS = {
  dashboard:'<path d="M3 3h8v8H3zM13 3h8v5h-8zM13 10h8v11h-8zM3 13h8v8H3z"/>',
  chapters:'<path d="M4 5h12l4 4v11H4zM16 5v4h4M8 13h8M8 17h8"/>',
@@ -21,12 +22,65 @@ const fmt = n => Number(n||0).toLocaleString('en-AU');
 const money = n => '$'+fmt(n);
 const pct = (a,b)=>b>0?Math.max(0,Math.min(100,Math.round(100*a/b))):0;
 function loadSave(){try{const stored=JSON.parse(localStorage.getItem(STORAGE_KEY)||'null');if(stored && typeof stored==='object' && stored.overrides && stored.fencing){save={overrides:stored.overrides,custom:stored.custom||[],fencing:stored.fencing,prefs:{allowLockedEditing:false,progressImported:false,...stored.prefs}};}}catch(e){console.warn('Unable to read local save',e)}}
-function persist(){try{localStorage.setItem(STORAGE_KEY,JSON.stringify(save));$('#save-status').innerHTML='<span class="live-dot"></span> Saved on this device';return true}catch(err){toast('Storage unavailable — export a backup now');return false}}
+// Store a complete new snapshot only after the browser confirms it was written.
+// A false success message could previously conceal an iOS storage/quota failure.
+function persist(next=save){
+ try{
+  const serialized=JSON.stringify(next);
+  localStorage.setItem(STORAGE_KEY,serialized);
+  if(localStorage.getItem(STORAGE_KEY)!==serialized)throw new Error('The browser did not retain the save');
+  save=next;
+  $('#save-status').classList.remove('error');
+  $('#save-status').innerHTML='<span class="live-dot"></span> Saved on this device';
+  return true;
+ }catch(err){
+  console.error('Leonida Tracker: unable to save changes',err);
+  $('#save-status').classList.add('error');
+  $('#save-status').innerHTML='<span class="live-dot"></span> SAVE FAILED';
+  toast('Save failed. Keep the app open; check iPhone storage, then export a backup.');
+  return false;
+ }
+}
+// Older imports stored a redundant copy of every base entry (2,685 records).
+// Retain every user change, but write only fields that differ from the public checklist.
+function minimalOverride(base,values){const result={};for(const [key,value] of Object.entries(values||{})){if(!Object.is(base[key],value))result[key]=value;}return result;}
+function compactOldSave(){
+ const bases=new Map(seed.items.map(x=>[x.id,x]));
+ let modified=false;
+ const overrides={};
+ for(const [id,changes] of Object.entries(save.overrides||{})){
+  const entry=bases.get(id);
+  const clean=entry?minimalOverride(entry,changes):changes;
+  if(Object.keys(clean).length)overrides[id]=clean;
+  if(!Object.keys(clean).length || Object.keys(clean).length!==Object.keys(changes||{}).length)modified=true;
+ }
+ if(modified){
+  const next={...save,overrides};
+  if(!persist(next))console.warn('Will retry save compaction on the next launch');
+ }
+}
+
 function toast(msg){const el=$('#toast');el.textContent=msg;el.classList.add('show');clearTimeout(noticeTimer);noticeTimer=setTimeout(()=>el.classList.remove('show'),3500)}
 function itemById(id){const base=seed.items.find(x=>x.id===id)||save.custom.find(x=>x.id===id);return base?{...base,...(save.overrides[id]||{})}:null}
 function allItems(){return seed.items.map(x=>({...x,...(save.overrides[x.id]||{})})).concat(save.custom.map(x=>({...x,...(save.overrides[x.id]||{})})));}
 function itemsFor(kind){return allItems().filter(x=>x.kind===kind)}
-function setItem(id, patch){const original=seed.items.find(x=>x.id===id);if(original){save.overrides[id]={...(save.overrides[id]||{}),...patch};}else{let x=save.custom.find(x=>x.id===id);if(x)Object.assign(x,patch)}persist();render()}
+function setItem(id,patch,shouldRender=true){
+ const original=seed.items.find(x=>x.id===id);
+ let next;
+ if(original){
+  const updates=minimalOverride(original,{...(save.overrides[id]||{}),...patch});
+  const overrides={...save.overrides};
+  if(Object.keys(updates).length)overrides[id]=updates;else delete overrides[id];
+  next={...save,overrides};
+ }else{
+  if(!save.custom.some(x=>x.id===id))return false;
+  next={...save,custom:save.custom.map(x=>x.id===id?{...x,...patch}:x)};
+ }
+ if(!persist(next))return false;
+ if(shouldRender)render();
+ return true;
+}
+
 function isDone(item){return item.status==='done'}
 function isResolved(item){return item.status==='done'||item.status==='missed'}
 function chapterItems(n){return allItems().filter(x=>x.kind==='chapter'&&x.chapter===n)}
@@ -113,7 +167,7 @@ function renderMoney(){return `${pageHead('Cumulative money milestones','Fencing
 function renderSettings(){const s=getStats();return `${pageHead('Your saved progress','Settings & backups','Your data stays on your device unless you deliberately export a file. No registration, subscription or cloud sync.')}
  <div class="notice notice-amber"><strong>Important for iPhone:</strong> Clear Safari website data, delete the home-screen app, or reinstall it, and your locally saved progress may be lost. Export a JSON backup regularly, and keep the file in iCloud Drive or Files. There is no automatic sync.</div>
  <div class="settings-grid"><section class="settings-card"><h3>Save a full backup</h3><p>Downloads every tick, missed item, edited location, note, custom discovery and fencing amount. Use this to move to another iPhone or restore your progress.</p><button class="btn btn-primary" data-act="export-json">Download JSON backup</button><button class="btn" data-act="export-csv">Export task CSV</button></section><section class="settings-card"><h3>Restore progress</h3><p>Import a previously exported Leonida Tracker JSON file. Importing replaces the progress currently stored on this device.</p><button class="btn" data-act="import-json">Import a backup</button></section><section class="settings-card"><h3>Chapter lock preferences</h3><p>By default, later chapters remain locked until all previous story and chapter-exclusive entries are resolved. You can allow early editing without altering the milestones.</p><label class="checkline"><input type="checkbox" id="allow-locked" ${save.prefs.allowLockedEditing?'checked':''}> Allow editing locked chapters</label></section><section class="settings-card"><h3>Data reset</h3><p>Delete changes on this device and return to the blank published checklist. This cannot be undone without a backup.</p><button class="btn btn-danger" data-act="reset-data">Reset to blank checklist</button></section></div>
- <div class="section-heading"><h2>Data provenance</h2><span>${fmt(s.total)} current entries</span></div><section class="panel"><div class="source-row"><strong>Source workbook</strong><span>${esc(seed.sourceFile)}</span></div><div class="source-row"><strong>Public checklist starting ticks</strong><span>${seed.completedCount}</span></div><div class="source-row"><strong>Current completed entries</strong><span>${s.completed}</span></div><div class="source-row"><strong>Current custom entries</strong><span>${save.custom.length}</span></div><div class="source-row"><strong>Workbook targets</strong><span>${seed.metrics.length} milestones</span></div><div class="source-row"><strong>Privacy</strong><span>Local-only; no telemetry</span></div><p style="font-size:12px;color:var(--muted);margin:16px 0 6px">The spreadsheet is the sole source for imported names, locations, statuses, guide links and completion thresholds. Indexed/unverified placeholders remain visibly identified.</p></section>
+ <div class="section-heading"><h2>Data provenance</h2><span>${fmt(s.total)} current entries · app v${APP_VERSION}</span></div><section class="panel"><div class="source-row"><strong>Source workbook</strong><span>${esc(seed.sourceFile)}</span></div><div class="source-row"><strong>Public checklist starting ticks</strong><span>${seed.completedCount}</span></div><div class="source-row"><strong>Current completed entries</strong><span>${s.completed}</span></div><div class="source-row"><strong>Current custom entries</strong><span>${save.custom.length}</span></div><div class="source-row"><strong>Workbook targets</strong><span>${seed.metrics.length} milestones</span></div><div class="source-row"><strong>Privacy</strong><span>Local-only; no telemetry</span></div><p style="font-size:12px;color:var(--muted);margin:16px 0 6px">The spreadsheet is the sole source for imported names, locations, statuses, guide links and completion thresholds. Indexed/unverified placeholders remain visibly identified.</p></section>
  <div class="section-heading"><h2>Workbook research links</h2><span>External guides</span></div><section class="panel source-list">${seed.sources.map(x=>`<div class="source-row"><div><strong>${esc(x.provider)}</strong><div style="color:var(--muted)">${esc(x.description)}</div></div><a class="source-link" href="${esc(x.url)}" target="_blank" rel="noopener noreferrer">Open ↗</a></div>`).join('')}</section>`;}
 function render(){if(!seed)return;renderNav();let html;
  switch(ui.view){case 'chapters':html=renderChapters();break;case 'world':html=renderWorld();break;case 'cards':html=renderCards();break;case 'money':html=renderMoney();break;case 'settings':html=renderSettings();break;default:html=renderDashboard();}
@@ -138,19 +192,39 @@ function exportBackup(){downloadText('Leonida_Tracker_Backup_'+new Date().toISOS
 function csvValue(s){return '"'+String(s??'').replace(/"/g,'""')+'"'}
 function exportCsv(){const fields=['id','kind','chapter','category','subgroup','title','where','status','gate','evidence','notes','source','sourceRow'];const rows=[fields.join(',')].concat(allItems().map(x=>fields.map(k=>csvValue(x[k])).join(',')));downloadText('Leonida_Tracker_Checklist_'+new Date().toISOString().slice(0,10)+'.csv','\uFEFF'+rows.join('\r\n'),'text/csv;charset=utf-8');toast('CSV checklist exported')}
 function importBackup(e){const file=e.target.files?.[0];if(!file)return;const reader=new FileReader();reader.onload=()=>{try{const obj=JSON.parse(reader.result);if(obj.format!=='leonida-tracker-backup-v1'||!Array.isArray(obj.items)||obj.items.length<20)throw Error('File is not a valid Leonida Tracker backup');if(!confirm(`Replace this device’s saved progress with ${obj.items.length.toLocaleString()} entries from the backup?`))return;const known=new Set(seed.items.map(x=>x.id));const overrides={};const custom=[];const allowed=['title','where','status','notes','evidence','chapter','category','subgroup','source'];
- for(const x of obj.items){if(typeof x.id!=='string'||!x.id)continue;const clean={};for(const field of allowed)if(Object.hasOwn(x,field))clean[field]=x[field];if(!['todo','done','missed'].includes(clean.status))clean.status='todo';if(known.has(x.id))overrides[x.id]=clean;else if(x.kind==='world'||x.kind==='chapter'||x.kind==='card')custom.push({...x,...clean});}
+ const baseMap=new Map(seed.items.map(x=>[x.id,x]));
+ for(const x of obj.items){
+  if(typeof x.id!=='string'||!x.id)continue;
+  const clean={};for(const field of allowed)if(Object.prototype.hasOwnProperty.call(x,field))clean[field]=x[field];
+  if(!['todo','done','missed'].includes(clean.status))clean.status='todo';
+  if(known.has(x.id)){
+   const diff=minimalOverride(baseMap.get(x.id),clean);
+   if(Object.keys(diff).length)overrides[x.id]=diff;
+  }else if(x.kind==='world'||x.kind==='chapter'||x.kind==='card')custom.push({...x,...clean});
+ }
+
  const fenced={};for(const x of obj.fencing||[])if(x&&typeof x.id==='string')fenced[x.id]=Math.max(0,Number(x.value)||0);
- save={overrides,custom,fencing:fenced,prefs:{allowLockedEditing:false,...obj.prefs,progressImported:true}};persist();switchView('dashboard');toast('Progress restored from backup');}catch(err){alert('Could not import this backup: '+err.message)}finally{e.target.value=''}};reader.readAsText(file)}
-function formSubmit(e){if(e.target.id!=='edit-form')return;e.preventDefault();const form=e.target;const data=new FormData(form);const id=data.get('id');const patch={title:String(data.get('title')||'').trim(),where:String(data.get('where')||'').trim(),status:data.get('status'),notes:String(data.get('notes')||''),evidence:data.get('evidence')||'NAMED'};
+ const candidate={overrides,custom,fencing:fenced,prefs:{allowLockedEditing:false,...obj.prefs,progressImported:true}};if(!persist(candidate))throw Error('The phone could not save the imported data. Your original progress is unchanged.');switchView('dashboard');toast('Progress restored and saved on this device');}catch(err){alert('Could not import this backup: '+err.message)}finally{e.target.value=''}};reader.readAsText(file)}
+function formSubmit(e){if(!e.target.matches('form#edit-form'))return;e.preventDefault();const form=e.target;const data=new FormData(form);const id=data.get('id');const patch={title:String(data.get('title')||'').trim(),where:String(data.get('where')||'').trim(),status:data.get('status'),notes:String(data.get('notes')||''),evidence:data.get('evidence')||'NAMED'};
  if(!patch.title)return;
  const ch=data.get('chapter');if(ch!==null)patch.chapter=Number(ch);
- if(!id){const task={id:'custom-'+Date.now().toString(36)+'-'+Math.random().toString(36).slice(2,7),kind:'world',sourceRow:null,sourceId:'CUSTOM',category:data.get('category')||'Random Events',subgroup:'Custom discoveries',source:'',gate:'',...patch};save.custom.push(task);persist();closeModal();ui.view='world';ui.search='';ui.status='all';ui.category='all';ui.limit=40;render();toast('Custom discovery added');}
- else{setItem(id,patch);closeModal();toast('Entry updated')}
+ if(!id){
+  const task={id:'custom-'+Date.now().toString(36)+'-'+Math.random().toString(36).slice(2,7),kind:'world',sourceRow:null,sourceId:'CUSTOM',category:data.get('category')||'Random Events',subgroup:'Custom discoveries',source:'',gate:'',...patch};
+  if(!persist({...save,custom:[...save.custom,task]}))return;
+  closeModal();ui.view='world';ui.search=task.title;ui.status='all';ui.category='all';ui.worldChapter='all';ui.limit=40;render();toast('Custom discovery saved');
+ }else{
+  if(!setItem(id,patch,false))return; // Do not close or claim success if the write failed.
+  closeModal();
+  // Keep the renamed record visible instead of letting the previous search hide it.
+  ui.search=patch.title;ui.status='all';ui.worldChapter='all';ui.limit=40;
+  render();toast('Changes saved: '+patch.title);
+ }
+
 }
 function handleClick(e){const el=e.target.closest('[data-act],[data-view]');if(!el)return;
  if(el.dataset.view){switchView(el.dataset.view);return}
  const act=el.dataset.act;
- if(act==='toggle-item'){const item=itemById(el.dataset.id);if(item){setItem(item.id,{status:item.status==='done'?'todo':'done'});toast(item.status==='done'?'Moved to not done':'Marked completed')}return}
+ if(act==='toggle-item'){const item=itemById(el.dataset.id);if(item&&setItem(item.id,{status:item.status==='done'?'todo':'done'}))toast(item.status==='done'?'Moved to not done':'Marked completed');return}
  if(act==='edit-item'){editItem(el.dataset.id);return}
  if(act==='add-item'){editItem(null);return}
  if(act==='close-modal'){closeModal();return}
@@ -162,17 +236,17 @@ function handleClick(e){const el=e.target.closest('[data-act],[data-view]');if(!
  if(act==='export-json'){exportBackup();return}
  if(act==='export-csv'){exportCsv();return}
  if(act==='import-json'){$('#backup-file').click();return}
- if(act==='reset-data'){if(confirm('This replaces all edits and saved progress with the workbook starting state. Export a backup first. Continue?')){save={overrides:{},custom:[],fencing:{},prefs:{allowLockedEditing:false,progressImported:false}};persist();switchView('dashboard');toast('Checklist reset; import a backup to restore progress')}return}
+ if(act==='reset-data'){if(confirm('This replaces all edits and saved progress with the workbook starting state. Export a backup first. Continue?')){if(persist({overrides:{},custom:[],fencing:{},prefs:{allowLockedEditing:false,progressImported:false}})){switchView('dashboard');toast('Checklist reset; import a backup to restore progress')}}return}
 }
 function handleChange(e){const el=e.target;
  if(el.id==='status-filter'){ui.status=el.value;ui.limit=40;render()}
  if(el.id==='category-filter'){ui.category=el.value;ui.limit=40;render()}
  if(el.id==='chapter-filter'){ui.worldChapter=el.value;ui.limit=40;render()}
- if(el.id==='allow-locked'){save.prefs.allowLockedEditing=el.checked;persist();render()}
- if(el.dataset.fence){const v=Math.max(0,Math.trunc(Number(el.value)||0));save.fencing[el.dataset.fence]=v;persist();render();toast('Fencing total saved')}
+ if(el.id==='allow-locked'){if(persist({...save,prefs:{...save.prefs,allowLockedEditing:el.checked}}))render();else el.checked=!el.checked}
+ if(el.dataset.fence){const v=Math.max(0,Math.trunc(Number(el.value)||0));if(persist({...save,fencing:{...save.fencing,[el.dataset.fence]:v}})){render();toast('Fencing total saved')}}
 }
 function handleInput(e){if(e.target.id==='list-search'){const val=e.target.value,pos=e.target.selectionStart;ui.search=val;ui.limit=40;render();const input=$('#list-search');if(input){input.focus();try{input.setSelectionRange(pos,pos)}catch{}}}}
-async function start(){try{loadSave();const res=await fetch('./data.json',{cache:'no-cache'});if(!res.ok)throw new Error('Could not load checklist data');seed=await res.json();if(!seed.items?.length||seed.metrics?.length!==35)throw new Error('Checklist data appears incomplete');render();}catch(err){$('#app').innerHTML=`<section class="notice notice-red"><strong>Unable to open the tracker:</strong> ${esc(err.message)}. Open this app through an HTTPS website or local web server; opening index.html directly from the Files app cannot load the full dataset.</section>`;console.error(err)}
+async function start(){try{loadSave();const res=await fetch('./data.json',{cache:'no-cache'});if(!res.ok)throw new Error('Could not load checklist data');seed=await res.json();if(!seed.items?.length||seed.metrics?.length!==35)throw new Error('Checklist data appears incomplete');compactOldSave();render();}catch(err){$('#app').innerHTML=`<section class="notice notice-red"><strong>Unable to open the tracker:</strong> ${esc(err.message)}. Open this app through an HTTPS website or local web server; opening index.html directly from the Files app cannot load the full dataset.</section>`;console.error(err)}
  if('serviceWorker'in navigator&&location.protocol==='https:')navigator.serviceWorker.register('./sw.js',{scope:'./'}).catch(err=>console.warn('Offline mode not available',err));
 }
 document.addEventListener('click',e=>{if(e.target.closest('#quick-backup')){if(seed)exportBackup();return}if(e.target.classList.contains('modal-backdrop'))closeModal();handleClick(e)});

@@ -1,0 +1,15 @@
+{
+  "name":"Leonida — GTA VI Completion Tracker",
+  "short_name":"Leonida Tracker",
+  "description":"Track GTA VI individual missions, collectibles and completion milestones offline.",
+  "start_url":"./index.html",
+  "scope":"./",
+  "display":"standalone",
+  "orientation":"portrait-primary",
+  "background_color":"#0b1315",
+  "theme_color":"#101b1d",
+  "icons":[
+    {"src":"./icons/icon-192.png","sizes":"192x192","type":"image/png","purpose":"any maskable"},
+    {"src":"./icons/icon-512.png","sizes":"512x512","type":"image/png","purpose":"any maskable"}
+  ]
+}
